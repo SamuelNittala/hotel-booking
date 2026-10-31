@@ -29,7 +29,7 @@ describe('InMemoryPaymentRepository', () => {
       const saved = payment(1);
       await repository.save(saved);
 
-      saved.succeed();
+      saved.succeed('txn-1');
       await repository.save(saved);
 
       expect((await repository.findById(1))?.status).toBe('success');
@@ -41,7 +41,7 @@ describe('InMemoryPaymentRepository', () => {
       const failed = payment(1, 10);
       failed.fail();
       const succeeded = payment(2, 10);
-      succeeded.succeed();
+      succeeded.succeed('txn-1');
       await repository.save(failed);
       await repository.save(succeeded);
       await repository.save(payment(3, 10));

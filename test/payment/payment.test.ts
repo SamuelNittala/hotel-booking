@@ -13,11 +13,11 @@ const props = (overrides: Partial<PaymentProps> = {}): PaymentProps => ({
 
 const paymentIn = (status: PaymentStatus): Payment => {
   const payment = Payment.create(props());
-  if (status === 'success') payment.succeed();
+  if (status === 'success') payment.succeed('txn-1');
   if (status === 'failure') payment.fail();
   if (status === 'cancelled') payment.cancel();
   if (status === 'refunded') {
-    payment.succeed();
+    payment.succeed('txn-1');
     payment.refund(5000);
   }
   return payment;
@@ -26,6 +26,7 @@ const paymentIn = (status: PaymentStatus): Payment => {
 type Action = 'succeed' | 'fail' | 'cancel' | 'refund';
 const perform = (payment: Payment, action: Action): void => {
   if (action === 'refund') payment.refund(5000);
+  else if (action === 'succeed') payment.succeed('txn-2');
   else payment[action]();
 };
 const resultingStatus: Record<Action, PaymentStatus> = {
@@ -99,7 +100,7 @@ describe('Payment status moves', () => {
     it('leaves the status unchanged after an illegal move', () => {
       const payment = paymentIn('failure');
 
-      expect(() => payment.succeed()).toThrow(InvalidPaymentTransitionError);
+      expect(() => payment.succeed('txn-2')).toThrow(InvalidPaymentTransitionError);
 
       expect(payment.status).toBe('failure');
     });
@@ -107,8 +108,57 @@ describe('Payment status moves', () => {
     it('names the payment and both statuses in the error', () => {
       const payment = paymentIn('failure');
 
-      expect(() => payment.succeed()).toThrow('Payment 1 cannot move from failure to success');
+      expect(() => payment.succeed('txn-2')).toThrow('Payment 1 cannot move from failure to success');
     });
+  });
+});
+
+describe('Payment.succeed', () => {
+  it('keeps the gateway reference', () => {
+    const payment = Payment.create(props());
+
+    payment.succeed('txn-9');
+
+    expect(payment.gatewayReference).toBe('txn-9');
+  });
+
+  it('has no gateway reference before it succeeds', () => {
+    expect(Payment.create(props()).gatewayReference).toBeUndefined();
+  });
+
+  it.each(['', '   '])('rejects an empty reference %j and stays pending', (reference) => {
+    const payment = Payment.create(props());
+
+    expect(() => payment.succeed(reference)).toThrow(InvalidPaymentError);
+
+    expect(payment.status).toBe('pending');
+    expect(payment.gatewayReference).toBeUndefined();
+  });
+});
+
+describe('Payment.assertCanRefund', () => {
+  it('accepts a full or partial amount on a successful payment', () => {
+    const payment = paymentIn('success');
+
+    expect(() => payment.assertCanRefund(5000)).not.toThrow();
+    expect(() => payment.assertCanRefund(100)).not.toThrow();
+  });
+
+  it('changes nothing', () => {
+    const payment = paymentIn('success');
+
+    payment.assertCanRefund(5000);
+
+    expect(payment.status).toBe('success');
+    expect(payment.refundedAmount).toBe(0);
+  });
+
+  it.each([0, -1, 5001, Number.NaN])('rejects an amount of %s', (amount) => {
+    expect(() => paymentIn('success').assertCanRefund(amount)).toThrow(InvalidPaymentError);
+  });
+
+  it('rejects a payment that is not successful', () => {
+    expect(() => paymentIn('pending').assertCanRefund(5000)).toThrow(InvalidPaymentTransitionError);
   });
 });
 

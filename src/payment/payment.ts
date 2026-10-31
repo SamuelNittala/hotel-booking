@@ -31,6 +31,7 @@ export class Payment {
 
   private currentStatus: PaymentStatus = 'pending';
   private currentRefundedAmount = 0;
+  private currentGatewayReference: string | undefined;
 
   private constructor(props: PaymentProps) {
     this.id = props.id;
@@ -39,7 +40,6 @@ export class Payment {
     this.method = props.method;
   }
 
-  /** Creates a new `pending` payment attempt after validating its basic fields. */
   static create(props: PaymentProps): Payment {
     if (!Number.isFinite(props.amount) || props.amount <= 0) {
       throw new InvalidPaymentError(`amount must be more than zero (got ${props.amount})`);
@@ -54,34 +54,42 @@ export class Payment {
     return this.currentStatus;
   }
 
-  /** How much of the payment has been given back. Zero until it is refunded. */
   get refundedAmount(): number {
     return this.currentRefundedAmount;
   }
 
-  /** The gateway took the money. */
-  succeed(): void {
-    this.transitionTo('success');
+  get gatewayReference(): string | undefined {
+    return this.currentGatewayReference;
   }
 
-  /** The gateway rejected the payment. */
+  succeed(gatewayReference: string): void {
+    this.assertCanMoveTo('success');
+    if (gatewayReference.trim() === '') {
+      throw new InvalidPaymentError('gatewayReference must not be empty');
+    }
+    this.currentGatewayReference = gatewayReference;
+    this.currentStatus = 'success';
+  }
+
   fail(): void {
     this.transitionTo('failure');
   }
 
-  /** The attempt was abandoned before it finished. */
   cancel(): void {
     this.transitionTo('cancelled');
   }
 
-  /** Gives back `refundAmount`, which can be the full amount or a part of it. A payment can be refunded once. */
   refund(refundAmount: number): void {
+    this.assertCanRefund(refundAmount);
+    this.currentRefundedAmount = refundAmount;
+    this.currentStatus = 'refunded';
+  }
+
+  assertCanRefund(refundAmount: number): void {
     this.assertCanMoveTo('refunded');
     if (!Number.isFinite(refundAmount) || refundAmount <= 0 || refundAmount > this.amount) {
       throw new InvalidPaymentError(`refund must be more than zero and at most ${this.amount} (got ${refundAmount})`);
     }
-    this.currentRefundedAmount = refundAmount;
-    this.currentStatus = 'refunded';
   }
 
   private transitionTo(next: PaymentStatus): void {
