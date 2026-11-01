@@ -39,6 +39,8 @@ npm run typecheck # type-check without building
 
 ## The API
 
+With the server running, open http://localhost:3000/docs for an interactive page where you can try every endpoint from the browser. The example requests are already filled in. The page loads Swagger UI from a CDN, so it needs internet. The raw spec is in `openapi.yaml` and also served at `/openapi.yaml`.
+
 | Method | Path | What it does |
 | --- | --- | --- |
 | POST | `/properties` | Add a property (rooms optional) |

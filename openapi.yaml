@@ -1,0 +1,516 @@
+openapi: 3.0.3
+info:
+  title: Hotel Booking API
+  version: 0.1.0
+  description: |
+    Add properties, search for rooms, book, pay, and cancel.
+
+    Everything is stored in memory, so restarting the server wipes all data.
+
+    **Quick tour:** add a property, book it, then pay for the booking.
+    Each request below has an example body filled in, so you can just press *Try it out* then *Execute*.
+    IDs are plain numbers handed out in order. On a fresh server the first property (with one room) gets id 2,
+    because its room takes id 1. The first booking and the first payment each get id 1.
+
+    **Seeing a declined payment:** the mock gateway approves everything except payers whose id starts
+    with `decline`. Use the `upiId` `decline@okbank` or a `walletId` starting with `decline`.
+    Card payments are always approved.
+servers:
+  - url: /
+tags:
+  - name: Properties
+  - name: Search
+  - name: Bookings
+  - name: Payments
+
+paths:
+  /properties:
+    post:
+      tags: [Properties]
+      summary: Add a property
+      description: Rooms are optional here. More can be added later with the rooms endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddPropertyRequest'
+            example:
+              ownerId: 1
+              name: Sea View
+              city: Goa
+              locality: Calangute
+              latitude: 15.54
+              longitude: 73.76
+              amenities: [wifi, pool]
+              starRating: 4
+              minNights: 1
+              rooms:
+                - { type: deluxe, capacity: 2, pricePerNight: 4000 }
+      responses:
+        '201':
+          description: Property created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Property'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /properties/{propertyId}/rooms:
+    post:
+      tags: [Properties]
+      summary: Add a room to a property
+      parameters:
+        - $ref: '#/components/parameters/PropertyId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddRoomRequest'
+            example:
+              type: suite
+              capacity: 4
+              pricePerNight: 9000
+      responses:
+        '201':
+          description: Room created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Room'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /properties/search:
+    get:
+      tags: [Search]
+      summary: Search for available rooms
+      description: |
+        Returns properties in the city that have at least one room free for every night of the stay
+        and that match all the filters. Each property lists only its matching, free rooms,
+        with the total price for the whole stay. The check-out day is not counted as a night.
+      parameters:
+        - { name: city, in: query, required: true, schema: { type: string }, example: Goa }
+        - { name: fromDate, in: query, required: true, description: Check-in date, schema: { type: string, format: date }, example: '2026-12-20' }
+        - { name: toDate, in: query, required: true, description: Check-out date, schema: { type: string, format: date }, example: '2026-12-23' }
+        - { name: guests, in: query, required: true, schema: { type: integer, minimum: 1 }, example: 2 }
+        - { name: locality, in: query, schema: { type: string }, example: Calangute }
+        - { name: minPrice, in: query, description: Lowest price per night, schema: { type: number } }
+        - { name: maxPrice, in: query, description: Highest price per night, schema: { type: number } }
+        - { name: amenities, in: query, description: 'Comma separated. The property must have all of them.', schema: { type: string }, example: 'wifi,pool' }
+        - { name: minStars, in: query, schema: { type: number } }
+        - { name: roomType, in: query, schema: { type: string }, example: deluxe }
+      responses:
+        '200':
+          description: Matching properties (an empty list if nothing matches)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SearchResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /bookings:
+    post:
+      tags: [Bookings]
+      summary: Create a booking
+      description: |
+        Books a room type at a property. The server picks a free room of that type.
+        The booking starts as `pending` and must be paid for within 15 minutes, or it expires.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBookingRequest'
+            example:
+              guestId: 10
+              propertyId: 2
+              roomType: deluxe
+              guestCount: 2
+              fromDate: '2026-12-20'
+              toDate: '2026-12-23'
+      responses:
+        '201':
+          description: Booking created (status `pending`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Every matching room is already booked for those dates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: The request breaks a rule, for example the stay is shorter than the property's minimum, or no room of that type fits the guests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /bookings/{bookingId}:
+    get:
+      tags: [Bookings]
+      summary: Look up a booking
+      parameters:
+        - $ref: '#/components/parameters/BookingId'
+      responses:
+        '200':
+          description: The booking
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /bookings/{bookingId}/payments:
+    post:
+      tags: [Payments]
+      summary: Pay for a booking
+      description: |
+        Pays the full booking amount. A successful payment confirms the booking.
+        A declined payment leaves the booking `pending` so the guest can try again;
+        after three declines the booking expires.
+      parameters:
+        - $ref: '#/components/parameters/BookingId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PayRequest'
+            examples:
+              upi:
+                summary: UPI (approved)
+                value: { method: UPI, details: { upiId: 'samuel@okbank' } }
+              upiDeclined:
+                summary: UPI (declined by the mock gateway)
+                value: { method: UPI, details: { upiId: 'decline@okbank' } }
+              wallet:
+                summary: Wallet (approved)
+                value: { method: WALLET, details: { walletId: 'wallet-123' } }
+              card:
+                summary: Card (approved)
+                value: { method: CARD, details: { cardNumber: '4111 1111 1111 1111' } }
+      responses:
+        '201':
+          description: Payment succeeded and the booking is now `confirmed`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentAttempt'
+        '402':
+          description: Payment was declined. The booking is still `pending` unless this was the last allowed attempt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentAttempt'
+        '409':
+          description: |
+            The payment was taken but the booking was cancelled or expired in the meantime,
+            so it was refunded straight away. Also returned when the booking can't be paid for
+            (not `pending`) or another payment for it is already running.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PaymentAttempt'
+                  - $ref: '#/components/schemas/Error'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /bookings/{bookingId}/cancel:
+    post:
+      tags: [Bookings]
+      summary: Cancel a booking
+      description: |
+        Cancels the booking and frees the room. If it was paid for, the refund follows the refund policy:
+        everything if you cancel 7 or more days before check-in, half from 2 days before, nothing after that.
+        If the refund fails at the gateway, the booking is still cancelled and `refundStatus` is `failed`;
+        retry it with the refunds endpoint.
+      parameters:
+        - $ref: '#/components/parameters/BookingId'
+      responses:
+        '200':
+          description: Booking cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancellationResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The booking can't be cancelled in its current state (already cancelled or expired)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /payments/{paymentId}/refunds:
+    post:
+      tags: [Payments]
+      summary: Refund a payment by hand
+      description: Use this to retry a refund that failed, or to refund part of a payment. Leave out `amount` to refund everything.
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          schema: { type: integer }
+          example: 1
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: number
+                  description: How much to refund. Defaults to the full amount paid.
+            example: {}
+      responses:
+        '200':
+          description: Refund done
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: This payment can't be refunded in its current state, or another operation on it is running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: The payment gateway refused the refund
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  parameters:
+    PropertyId:
+      name: propertyId
+      in: path
+      required: true
+      schema: { type: integer }
+      example: 2
+    BookingId:
+      name: bookingId
+      in: path
+      required: true
+      schema: { type: integer }
+      example: 1
+
+  responses:
+    BadRequest:
+      description: The request is malformed or has invalid values
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Something the request refers to doesn't exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            type: { type: string, example: BookingNotFoundError }
+            message: { type: string }
+
+    AddRoomRequest:
+      type: object
+      required: [type, capacity, pricePerNight]
+      properties:
+        type: { type: string, example: deluxe }
+        capacity: { type: integer, minimum: 1 }
+        pricePerNight: { type: number, minimum: 0 }
+
+    AddPropertyRequest:
+      type: object
+      required: [ownerId, name, city, locality, latitude, longitude, amenities, starRating]
+      properties:
+        ownerId: { type: integer }
+        name: { type: string }
+        city: { type: string }
+        locality: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        amenities:
+          type: array
+          items: { type: string }
+        starRating: { type: number }
+        minNights:
+          type: integer
+          description: Shortest stay allowed. Optional.
+        rooms:
+          type: array
+          items:
+            $ref: '#/components/schemas/AddRoomRequest'
+
+    Room:
+      type: object
+      properties:
+        id: { type: integer }
+        type: { type: string }
+        capacity: { type: integer }
+        pricePerNight: { type: number }
+
+    PropertySummary:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        ownerId: { type: integer }
+        location:
+          type: object
+          properties:
+            city: { type: string }
+            locality: { type: string }
+            latitude: { type: number }
+            longitude: { type: number }
+        amenities:
+          type: array
+          items: { type: string }
+        starRating: { type: number }
+        minNights: { type: integer }
+
+    Property:
+      allOf:
+        - $ref: '#/components/schemas/PropertySummary'
+        - type: object
+          properties:
+            rooms:
+              type: array
+              items:
+                $ref: '#/components/schemas/Room'
+
+    RoomOffer:
+      allOf:
+        - $ref: '#/components/schemas/Room'
+        - type: object
+          properties:
+            totalPrice:
+              type: number
+              description: Price for the whole stay (nights x price per night)
+
+    SearchResult:
+      type: object
+      properties:
+        property:
+          $ref: '#/components/schemas/PropertySummary'
+        rooms:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoomOffer'
+
+    CreateBookingRequest:
+      type: object
+      required: [guestId, propertyId, roomType, guestCount, fromDate, toDate]
+      properties:
+        guestId: { type: integer }
+        propertyId: { type: integer }
+        roomType: { type: string }
+        guestCount: { type: integer, minimum: 1 }
+        fromDate: { type: string, format: date, description: Check-in date }
+        toDate: { type: string, format: date, description: Check-out date }
+
+    Booking:
+      type: object
+      properties:
+        id: { type: integer }
+        guestId: { type: integer }
+        propertyId: { type: integer }
+        roomId: { type: integer }
+        guestCount: { type: integer }
+        fromDate: { type: string, format: date }
+        toDate: { type: string, format: date }
+        totalAmount: { type: number }
+        status:
+          type: string
+          enum: [pending, confirmed, cancelled, expired]
+        createdAt: { type: string, format: date-time }
+
+    PayRequest:
+      type: object
+      required: [method]
+      properties:
+        method:
+          type: string
+          enum: [UPI, WALLET, CARD]
+        details:
+          type: object
+          description: 'UPI needs `upiId` (like name@bank), WALLET needs `walletId`, CARD needs `cardNumber` (13 to 19 digits).'
+          additionalProperties: { type: string }
+
+    Payment:
+      type: object
+      properties:
+        id: { type: integer }
+        bookingId: { type: integer }
+        amount: { type: number }
+        method: { type: string }
+        status:
+          type: string
+          enum: [pending, success, failure, cancelled, refunded]
+        refundedAmount: { type: number }
+        gatewayReference:
+          type: string
+          nullable: true
+
+    PaymentAttempt:
+      type: object
+      properties:
+        payment:
+          $ref: '#/components/schemas/Payment'
+        booking:
+          $ref: '#/components/schemas/Booking'
+
+    CancellationResult:
+      type: object
+      properties:
+        booking:
+          $ref: '#/components/schemas/Booking'
+        refundAmount: { type: number }
+        refundStatus:
+          type: string
+          enum: [none, refunded, failed]
+          description: '`none` means nothing was due (unpaid booking or the policy gave 0).'
+        paymentId:
+          type: integer
+          nullable: true
