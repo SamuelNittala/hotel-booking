@@ -90,3 +90,52 @@ Wallet takes `{ "walletId": "..." }` and card takes `{ "cardNumber": "..." }` in
 The mock gateway approves everything except payers whose id starts with `decline`. So a UPI id like `decline@okbank` is a quick way to see a failed payment.
 
 IDs are plain numbers handed out in order. Properties and rooms share one counter, which is why the property above gets id 2 on a fresh server: its room took 1. Bookings and payments each count from 1 on their own.
+
+## Key design decisions
+
+**Four layers, each with one job.** Entities (`Booking`, `Payment`, `Room`...) own the rules about their own state. Repositories only store and fetch, and sit behind interfaces with an in-memory version today, so a database can replace them without touching the rest. Services coordinate several things, like taking a payment and then confirming the booking. The REST layer stays thin: check the input, call one service, turn the result into JSON.
+
+**Anything that varies is pluggable.** Search filters, payment methods and refund policies are each an interface. Adding a new one means writing one class and registering it, and nothing else changes. Search filters come in two kinds, ones about the property (city, stars, amenities) and ones about its rooms (price, capacity). All the room filters have to be met by the *same* room, so "fits 3 guests and costs under 5000" can't be satisfied by two different rooms.
+
+**Status changes go through a small table.** A booking can go pending to confirmed, cancelled or expired, and confirmed to cancelled. Anything else throws. Payments work the same way. It keeps the rules in one place and makes a new status a one-line change.
+
+**No double booking.** Reserving a room checks that it's free and records the reservation in one step, with nothing asynchronous in between. Node runs one piece of code at a time, so two guests going for the last room can't both win. Booking never does a separate "is it free?" check first, because that gap is where races come from. Dates are half-open, so the check-out day is free for the next guest.
+
+**Steps are ordered so a failure is safe.** When two steps can't happen together, I picked the order where a crash leaves things annoying instead of wrong:
+- Booking reserves the room first, then saves, and gives the room back if the save fails.
+- Cancelling saves the new status first, then releases the dates. If the release fails the room stays blocked, which is better than it being bookable while the booking still looks active.
+- Cancelling cancels the booking first, then refunds. If the refund fails the booking is still cancelled, the response says the refund failed, and it can be retried.
+
+**Payments are careful about the "paid but too late" case.** The payment is saved as successful before the booking is touched. If the booking was cancelled or expired while the gateway was working, the payment is refunded straight away. Two pay requests for the same booking can't run together (the second gets a 409), and after three declines the booking expires.
+
+**Errors are exceptions, not return values.** The domain throws specific errors, and one table in `error-handler.ts` maps them to HTTP statuses. That keeps the normal path easy to read.
+
+**Unpaid bookings expire through a sweep.** A job runs every minute and expires pending bookings older than 15 minutes. It's simpler than a timer per booking, and it doesn't lose anything on a restart.
+
+**The API spec is written by hand** in `openapi.yaml` and shown with Swagger UI, so it can be tried straight from the browser.
+
+## Assumptions
+
+The brief leaves some things open. This is what I assumed:
+
+- One booking is for one room. Booking several rooms at once isn't supported.
+- A guest asks for a room *type*, and the server picks the first free room of that type.
+- Price is nights times the nightly price. No taxes, fees or discounts.
+- The full amount is paid in one go, through one payment.
+- Dates are plain calendar dates (UTC). Check-in is a night you stay, check-out is not.
+- An unpaid booking holds its room for 15 minutes.
+- There is one refund policy for the whole system (full refund 7+ days before check-in, half from 2 days out, nothing after). It isn't set per property.
+- Guest and owner ids are trusted numbers. There's no login or user accounts.
+- The payment gateway is a mock. It approves everything unless the payer id starts with `decline`.
+- Data lives in memory only.
+
+## What I'd do with more time
+
+- **A real database.** Transactions and a unique constraint on room and date would replace the "check and write together" trick, and a version column would stop two people overwriting each other's edits to a property.
+- **Idempotency keys** on booking and payment, so a retried request can't book or charge twice. Right now there's only a guard inside one running server.
+- **One price calculator** shared by search and booking. The price is worked out in both places today, which would bite as soon as pricing gets smarter (weekends, seasons, demand).
+- **Tighter edges.** Reject dates in the past, stop accepting payment once the 15 minutes are up even if the sweep hasn't run yet, and handle the rare moment where a cancel and a payment land on the same pending booking.
+- **Gateway timeouts.** If the gateway doesn't answer, we don't know whether the money moved. That needs a status check or a callback to sort out later.
+- **Refund policy per property**, and booking more than one room at once.
+- **The usual extras.** Sorting and paging in search, login, a `GET /properties/:id`, and a test that checks `openapi.yaml` against the real routes.
+- **A proper production build.** `npm start` runs the TypeScript directly through `tsx`. I didn't set up a compiled build.
