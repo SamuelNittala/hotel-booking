@@ -12,13 +12,6 @@ import {
   RefundFailedError,
   UnsupportedPaymentMethodError,
 } from '../../src/payment/errors';
-import {
-  ChargeRequest,
-  GatewayOutcome,
-  PaymentGateway,
-  RefundRequest,
-} from '../../src/payment/gateway/payment-gateway';
-import { MockPaymentGateway } from '../../src/payment/gateway/mock-payment-gateway';
 import { InMemoryPaymentRepository } from '../../src/payment/in-memory-payment-repository';
 import { CardPaymentMethod } from '../../src/payment/method/card-payment-method';
 import { PayerDetails } from '../../src/payment/method/payment-method';
@@ -32,41 +25,7 @@ import { PropertyLocation } from '../../src/property/property-location';
 import { Room } from '../../src/property/room';
 import { DateRange } from '../../src/shared/date-range';
 import { SequentialIdGenerator } from '../../src/shared/sequential-id-generator';
-
-/**
- * Wraps the mock gateway so a test can make things go wrong at a chosen moment:
- * run code while the charge is still "in the gateway", refuse refunds, or fail the call completely.
- */
-class TestGateway implements PaymentGateway {
-  declining = false;
-  failRefunds = false;
-  chargeError: Error | undefined;
-  duringCharge: (() => Promise<void>) | undefined;
-  private readonly inner = new MockPaymentGateway(() => this.declining);
-
-  get charges(): readonly ChargeRequest[] {
-    return this.inner.charges;
-  }
-
-  get refunds(): readonly RefundRequest[] {
-    return this.inner.refunds;
-  }
-
-  async charge(request: ChargeRequest): Promise<GatewayOutcome> {
-    if (this.chargeError) throw this.chargeError;
-    const outcome = await this.inner.charge(request);
-    await this.duringCharge?.();
-    return outcome;
-  }
-
-  async refund(request: RefundRequest): Promise<GatewayOutcome> {
-    if (this.failRefunds) {
-      this.inner.refunds.push(request);
-      return { status: 'failure', reason: 'refund refused' };
-    }
-    return this.inner.refund(request);
-  }
-}
+import { TestGateway } from '../support/test-gateway';
 
 const stay = DateRange.of('2026-11-10', '2026-11-12'); // 2 nights at 4000 = 8000
 const upi: PayerDetails = { upiId: 'asha@okbank' };
